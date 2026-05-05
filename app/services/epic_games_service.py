@@ -514,15 +514,9 @@ class EpicGames:
     @staticmethod
     async def _is_device_not_supported_visible(page: Page) -> bool:
         try:
-            body_text = await EpicGames._page_text(page)
+            body_text = await EpicGames._combined_text(page)
         except Exception:
-            return False
-
-        if "DEVICE NOT SUPPORTED" not in body_text:
-            return False
-
-        if not ("CANCEL" in body_text and "CONTINUE" in body_text):
-            return False
+            body_text = ""
 
         candidates = [
             page.get_by_role("button", name="Continue"),
@@ -530,9 +524,18 @@ class EpicGames:
                 "//button[normalize-space(.)='Continue' or .//span[normalize-space(.)='Continue']]"
             ),
         ]
+        continue_visible = False
         for locator in candidates:
             if await EpicGames._is_locator_visible(locator, timeout=250):
-                return True
+                continue_visible = True
+                break
+
+        if "DEVICE NOT SUPPORTED" in body_text and continue_visible:
+            return True
+
+        if "NOT COMPATIBLE WITH YOUR CURRENT DEVICE" in body_text and continue_visible:
+            return True
+
         return False
 
     @staticmethod
@@ -541,9 +544,6 @@ class EpicGames:
             return True
 
         if await EpicGames._is_claimed_state(page, url):
-            return True
-
-        if await EpicGames._is_device_not_supported_visible(page):
             return True
 
         if await EpicGames._is_checkout_security_check_visible(page):
@@ -598,6 +598,14 @@ class EpicGames:
         )
 
         for name, action in click_attempts:
+            if await EpicGames._is_device_not_supported_visible(page):
+                logger.warning(
+                    "Device not supported modal blocking purchase click - dismissing before {} attempt - {}",
+                    name,
+                    url,
+                )
+                await EpicGames._handle_device_not_supported_modal(page, url, timeout_ms=5000)
+
             try:
                 await asyncio.wait_for(action(), timeout=7000)
             except Exception as err:
@@ -605,6 +613,16 @@ class EpicGames:
                 continue
 
             await page.wait_for_timeout(2500)
+
+            if await EpicGames._is_device_not_supported_visible(page):
+                logger.warning(
+                    "Device not supported modal appeared after {} click - dismissing - {}",
+                    name,
+                    url,
+                )
+                await EpicGames._handle_device_not_supported_modal(page, url, timeout_ms=5000)
+                await page.wait_for_timeout(1500)
+
             if await self._has_purchase_progress(page, url):
                 logger.debug("Purchase button {} click produced progress - {}", name, url)
                 return True
@@ -1388,6 +1406,12 @@ class EpicGames:
             # 只要不是黑名单，也不是购物车，统统当做 "Get/Purchase" 直接点击！
             # 不管它写的是 'Get', 'Free', 'Purchase', 'Buy Now'，只要 API 说是免费的，我们就点！
             logger.debug(f"⚡️ Logic: Aggressive Click (Text: {btn_text}) - {url=}")
+            if await EpicGames._is_device_not_supported_visible(page):
+                logger.warning(
+                    f"Pre-click: device not supported modal detected, dismissing first. {url=}"
+                )
+                await EpicGames._handle_device_not_supported_modal(page, url, timeout_ms=5000)
+
             if not await self._click_purchase_button(page, purchase_btn, url):
                 failed_urls.append(url)
                 continue
