@@ -583,3 +583,43 @@
   - 对延迟出现的 `/id/login/correction/privacy-policy` 重定向改为显式识别，给出明确的人工确认提示，不再落成泛化的 `//egs-navigation` 超时异常。
   - 领取页登录态检查改成短轮询稳态等待，避免刚跳转时的瞬时中间页被误判成未知异常。
   - Celery 调度入口与主入口统一：认证失败会立即终止，而不是继续进入领取阶段。
+
+
+## 2026-05-14 - GLM drag captcha normalization and trajectory tuning
+
+- Symptom: GLM-backed hCaptcha drag solving sometimes returned structures such as `answer: [{source, target}]` or `moves: [{start_x, start_y, end_x, end_y}]`, causing `ImageDragDropChallenge` validation errors before retrying. Successful parses still used `DISABLE_BEZIER_TRAJECTORY=true`, producing less human-like drags.
+- Root-cause judgment: GLM output compatibility layer did not normalize several observed drag-answer shapes; local `.env` overrode the upstream AgentConfig default for Bezier trajectory.
+- Changed files: `app/extensions/llm_adapter.py`, `tests/test_glm_adapter.py`, `.env`.
+- Result: Targeted import probe converts both observed drag payload shapes into `paths`; runtime settings now load `DISABLE_BEZIER_TRAJECTORY=false` with `BROWSER_BACKEND=camoufox` and `LLM_PROVIDER=glm`. Full test execution remains disallowed by AGENTS.md; verification used a targeted non-test probe.
+
+## 2026-05-15 - Hermes cron timeout and Place Order logging timeout
+
+- Symptom:
+  - Hermes cron job `Epic 每 7 天自动领取免费游戏` failed with `Script timed out after 120s` before the project script's own 35-minute timeout could take effect.
+  - After extending the cron window and rerunning, the browser workflow logged in successfully but failed during instant checkout with `Locator.text_content: Timeout 30000ms exceeded` while preparing the Place Order submission log line.
+- Root-cause judgment:
+  - Hermes cron pre-run scripts use the global `cron.script_timeout_seconds` limit, so the outer scheduler killed the job long before this browser automation task's normal runtime.
+  - The debug paths eagerly called `purchase_btn.text_content()` / `payment_btn.text_content()` with Playwright's default timeout; if the product page or checkout iframe/button became slow or stale, logging itself raised before the robust click/error-handling logic could run.
+- Changed files:
+  - `app/services/epic_games_service.py`
+  - User Hermes config: `cron.script_timeout_seconds=2400`
+  - `docs/maintenance-log.md`
+- Result:
+  - The cron script timeout now allows up to 40 minutes, matching this task's expected browser/captcha runtime envelope.
+  - Purchase-button context logging now uses short, individually suppressed locator reads, and Place Order cycle logging now uses `_payment_button_state()`, so debug logging no longer aborts checkout on transient/stale locators.
+
+
+## 2026-05-18 - Skip unclaimable Epic vault/code-redemption placeholder offers
+
+- Symptom:
+  - Hermes cron job `Epic 每 7 天自动领取免费游戏` logged in successfully, then failed on `https://store.epicgames.com/en-US/p/sunderfolk-standard-edition-83c05e`.
+  - Purchase debug text showed the product page rendered `This content is currently unavailable in your platform or region`, and the script repeatedly failed to find `purchase-cta-button`.
+- Root-cause judgment:
+  - Epic's promotions API can include vault/code-redemption-only placeholder offers as 100% discounted free-game entries. These entries are not actually claimable from the normal product-page checkout flow, so treating them as regular promotions makes the whole cron job fail even though the account/session is valid.
+  - The observed entry had `isCodeRedemptionOnly=true`, `categories` including `freegames/vaulted`, empty `offerMappings`, and no usable claim UI on the page.
+- Changed files:
+  - `app/services/epic_games_service.py`
+  - `docs/maintenance-log.md`
+- Result:
+  - `get_promotions()` now skips unclaimable vault/code-redemption placeholder offers before URL generation, while still keeping normal discounted promotions in the claim flow.
+  - The cron script should no longer fail solely because Epic exposes a mystery/vault placeholder that is visible in the API but unavailable on the storefront.

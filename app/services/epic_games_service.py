@@ -71,6 +71,29 @@ def get_promotions() -> List[PromotionGame]:
         if not is_discount_game(e):
             continue
 
+        categories = [cat.get("path", "").lower() for cat in e.get("categories", [])]
+        title = e.get("title", "")
+        product_slug = e.get("productSlug")
+        url_slug = e.get("urlSlug")
+        offer_mappings = e.get("offerMappings") or []
+
+        # Vault placeholder / code-redemption-only offers may be listed as 100%
+        # discounted promotions before they are actually claimable.  They render
+        # as "This content is currently unavailable in your platform or region"
+        # on the product page and should not fail the whole weekly task.
+        if e.get("isCodeRedemptionOnly") and (
+            "freegames/vaulted" in categories
+            or product_slug in (None, "", "[]")
+            or not offer_mappings
+        ):
+            logger.info(
+                "Skip unclaimable vault/code-redemption offer: title='{}' productSlug='{}' urlSlug='{}'",
+                title,
+                product_slug,
+                url_slug,
+            )
+            continue
+
         # -----------------------------------------------------------
         # 🟢 智能 URL 识别逻辑
         # -----------------------------------------------------------
@@ -80,23 +103,26 @@ def get_promotions() -> List[PromotionGame]:
 
         # 补充检测：分类和标题
         if not is_bundle:
-            for cat in e.get("categories", []):
-                if "bundle" in cat.get("path", "").lower():
+            for cat_path in categories:
+                if "bundle" in cat_path:
                     is_bundle = True
                     break
-        if not is_bundle and "Collection" in e.get("title", ""):
+        if not is_bundle and "Collection" in title:
             is_bundle = True
 
         base_url = URL_PRODUCT_BUNDLES if is_bundle else URL_PRODUCT_PAGE
 
         try:
-            if e.get('offerMappings'):
-                slug = e['offerMappings'][0]['pageSlug']
+            if offer_mappings:
+                slug = offer_mappings[0]['pageSlug']
                 e["url"] = f"{base_url.rstrip('/')}/{slug}"
-            elif e.get("productSlug"):
-                e["url"] = f"{base_url.rstrip('/')}/{e['productSlug']}"
+            elif product_slug and product_slug != "[]":
+                e["url"] = f"{base_url.rstrip('/')}/{product_slug}"
+            elif url_slug:
+                e["url"] = f"{base_url.rstrip('/')}/{url_slug}"
             else:
-                e["url"] = f"{base_url.rstrip('/')}/{e.get('urlSlug', 'unknown')}"
+                logger.info(f"Failed to get URL: {e}")
+                continue
         except (KeyError, IndexError):
             logger.info(f"Failed to get URL: {e}")
             continue
@@ -713,18 +739,29 @@ class EpicGames:
 
     @staticmethod
     async def _log_purchase_button_context(page: Page, purchase_btn, url: str):
-        btn_text = (await purchase_btn.text_content() or "").strip()
-        disabled = await purchase_btn.get_attribute("disabled")
-        aria_disabled = await purchase_btn.get_attribute("aria-disabled")
-        btn_class = await purchase_btn.get_attribute("class")
-        btn_testid = await purchase_btn.get_attribute("data-testid")
+        btn_text = ""
+        disabled = None
+        aria_disabled = None
+        btn_class = None
+        btn_testid = None
         container_text = ""
+
+        with suppress(Exception):
+            btn_text = (await purchase_btn.text_content(timeout=2000) or "").strip()
+        with suppress(Exception):
+            disabled = await purchase_btn.get_attribute("disabled", timeout=1000)
+        with suppress(Exception):
+            aria_disabled = await purchase_btn.get_attribute("aria-disabled", timeout=1000)
+        with suppress(Exception):
+            btn_class = await purchase_btn.get_attribute("class", timeout=1000)
+        with suppress(Exception):
+            btn_testid = await purchase_btn.get_attribute("data-testid", timeout=1000)
 
         with suppress(Exception):
             container = purchase_btn.locator(
                 "xpath=ancestor::*[self::section or self::aside or self::div][1]"
             )
-            container_text = (await container.text_content() or "").strip()
+            container_text = (await container.text_content(timeout=2000) or "").strip()
             container_text = " ".join(container_text.split())[:800]
 
         logger.debug(
@@ -1265,10 +1302,10 @@ class EpicGames:
 
                 _wpc, payment_btn = payload
                 logger.debug(
-                    "Place Order submission cycle ({}/{}) | button_text={}",
+                    "Place Order submission cycle ({}/{}) | button_state={}",
                     attempt,
                     4,
-                    await payment_btn.text_content(),
+                    await self._payment_button_state(payment_btn),
                 )
                 await self._submit_place_order(payment_btn, url)
 

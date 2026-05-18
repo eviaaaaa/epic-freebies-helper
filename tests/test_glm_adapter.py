@@ -1,6 +1,6 @@
 import json
 
-from hcaptcha_challenger.models import ImageAreaSelectChallenge
+from hcaptcha_challenger.models import ImageAreaSelectChallenge, ImageDragDropChallenge
 
 from extensions.llm_adapter import (
     _coerce_payload_for_schema,
@@ -39,3 +39,29 @@ def test_area_select_dict_boxes_are_converted_to_click_points():
         {"x": 20, "y": 40},
         {"x": 150, "y": 250},
     ]
+
+
+def test_drag_answer_source_target_strings_are_converted_to_paths():
+    payload = {"answer": [{"source": "(1139, 559)", "target": "(960, 559)"}]}
+    text = json.dumps(payload)
+
+    coerced = _coerce_payload_for_schema(
+        _normalize_glm_payload(payload), ImageDragDropChallenge, text
+    )
+    challenge = ImageDragDropChallenge(**coerced)
+
+    assert challenge.paths[0].start_point.model_dump() == {"x": 1139, "y": 559}
+    assert challenge.paths[0].end_point.model_dump() == {"x": 960, "y": 559}
+
+
+def test_drag_moves_flat_coordinates_are_converted_to_paths():
+    payload = {"moves": [{"start_x": 1156, "start_y": 575, "end_x": 1013, "end_y": 670}]}
+    text = json.dumps(payload)
+
+    coerced = _coerce_payload_for_schema(
+        _normalize_glm_payload(payload), ImageDragDropChallenge, text
+    )
+    challenge = ImageDragDropChallenge(**coerced)
+
+    assert challenge.paths[0].start_point.model_dump() == {"x": 1156, "y": 575}
+    assert challenge.paths[0].end_point.model_dump() == {"x": 1013, "y": 670}

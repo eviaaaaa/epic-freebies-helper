@@ -16,6 +16,7 @@ KNOWN_CHALLENGE_TYPES = {
     "image_drag_multiple",
     "image_drag_multi",
     "image_label_binary",
+    "image_label_single_select",
     "image_label_multi_select",
     "image_label_area_select",
     "image_label_multiple_choice",
@@ -186,6 +187,24 @@ def _extract_drag_points_from_text(text: str) -> tuple[dict[str, int], dict[str,
     )
     if source_target_flat:
         sx, sy, tx, ty = map(int, source_target_flat.groups())
+        return ({"x": sx, "y": sy}, {"x": tx, "y": ty})
+
+    source_target_quoted = re.search(
+        r'"source"\s*:\s*"\s*\(?\s*(\d+)\s*,\s*(\d+)\s*\)?\s*"[\s\S]*?"target"\s*:\s*"\s*\(?\s*(\d+)\s*,\s*(\d+)\s*\)?\s*"',
+        stripped,
+        flags=re.IGNORECASE,
+    )
+    if source_target_quoted:
+        sx, sy, tx, ty = map(int, source_target_quoted.groups())
+        return ({"x": sx, "y": sy}, {"x": tx, "y": ty})
+
+    start_end_flat = re.search(
+        r'"start_x"\s*:\s*(\d+)\s*,\s*"start_y"\s*:\s*(\d+)[\s\S]*?"end_x"\s*:\s*(\d+)\s*,\s*"end_y"\s*:\s*(\d+)',
+        stripped,
+        flags=re.IGNORECASE,
+    )
+    if start_end_flat:
+        sx, sy, tx, ty = map(int, start_end_flat.groups())
         return ({"x": sx, "y": sy}, {"x": tx, "y": ty})
 
     source_position = re.search(
@@ -537,6 +556,22 @@ def _coerce_payload_for_schema(payload: dict[str, Any], schema: Any, text: str) 
             return normalized_drag
 
     if "points" in fields:
+        if "points" in payload:
+            points = []
+            for point in _ensure_list(payload.get("points")):
+                normalized = _coerce_point(point)
+                if normalized:
+                    points.append(normalized)
+            if points:
+                return _build_points_payload(
+                    points,
+                    challenge_prompt=challenge_prompt,
+                    inferred_rule=inferred_rule,
+                )
+            payload.setdefault("challenge_prompt", challenge_prompt)
+            payload.setdefault("inferred_rule", inferred_rule)
+            return payload
+
         area_payload = _build_area_select_payload(
             _extract_area_boxes_from_text(text),
             challenge_prompt=challenge_prompt,
@@ -605,6 +640,29 @@ def _normalize_glm_payload(payload: dict[str, Any]) -> dict[str, Any]:
     )
     if normalized_answer:
         return normalized_answer
+
+    answer_payload = payload.get("answer")
+    if isinstance(answer_payload, list) and len(answer_payload) == 1:
+        normalized = _normalize_glm_answer_value(
+            answer_payload[0],
+            challenge_prompt=challenge_prompt,
+            inferred_rule=inferred_rule,
+        )
+        if normalized and "paths" in normalized:
+            return normalized
+
+    if "moves" in payload and isinstance(payload.get("moves"), list):
+        for move in payload["moves"]:
+            if not isinstance(move, dict):
+                continue
+            normalized = _build_drag_payload(
+                {"x": move.get("start_x"), "y": move.get("start_y")},
+                {"x": move.get("end_x"), "y": move.get("end_y")},
+                challenge_prompt=challenge_prompt,
+                inferred_rule=inferred_rule,
+            )
+            if normalized:
+                return normalized
 
     if "source" in payload and "target" in payload:
         normalized = _build_drag_payload(
@@ -700,7 +758,7 @@ class _GLMAsyncModels:
 
     def _to_image_part(self, payload: bytes, mime_type: str) -> dict[str, Any]:
         encoded = base64.b64encode(payload).decode("utf-8")
-        return {"type": "image_url", "image_url": {"url": encoded}}
+        return {"type": "image_url", "image_url": {"url": f"data:{mime_type};base64,{encoded}"}}
 
     def _part_to_content_item(self, part: Any) -> dict[str, Any] | None:
         text = getattr(part, "text", None)
@@ -770,7 +828,9 @@ class _GLMAsyncModels:
         if getattr(config, "response_schema", None) is not None:
             payload["response_format"] = {"type": "json_object"}
 
-        if getattr(config, "thinking_config", None) is not None and model.startswith("glm-4.5"):
+        if model.startswith("glm-5"):
+            payload["thinking"] = {"type": "disabled"}
+        elif getattr(config, "thinking_config", None) is not None and model.startswith("glm-4.5"):
             payload["thinking"] = {"type": "enabled"}
 
         payload.update({k: v for k, v in kwargs.items() if k not in {"config"}})
